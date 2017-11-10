@@ -210,19 +210,16 @@ class AppServicePlanScenarioTest(ScenarioTest):
         plan = 'webapp-delete-plan2'
         self.cmd('appservice plan create -g {} -n {} -l westus'.format(resource_group, plan))
 
-        self.cmd('appservice plan update -g {} -n {} --sku S1'.format(resource_group, plan), checks=[
-             JMESPathCheckV2('name', plan),
-             JMESPathCheckV2('sku.tier', 'Standard'),
-             JMESPathCheckV2('sku.name', 'S1')
-        ])
+        self.cmd('appservice plan update -g {} -n {} --sku S1'.format(resource_group, plan),
+                 checks=[JMESPathCheckV2('name', plan),
+                         JMESPathCheckV2('sku.tier', 'Standard'),
+                         JMESPathCheckV2('sku.name', 'S1')])
 
         self.cmd('webapp create -g {} -n {} --plan {}'.format(resource_group, webapp_name, plan))
 
         self.cmd('webapp delete -g {} -n {}'.format(resource_group, webapp_name))
         # test empty service plan should be automatically deleted.
-        self.cmd('appservice plan list -g {}'.format(resource_group), checks=[
-            JMESPathCheckV2('length(@)', 0)
-        ])
+        self.cmd('appservice plan list -g {}'.format(resource_group), checks=[JMESPathCheckV2('length(@)', 0)])
 
 
 class WebappConfigureTest(ScenarioTest):
@@ -765,6 +762,27 @@ class FunctionAppWithConsumptionPlanE2ETest(ScenarioTest):
         self.cmd('functionapp delete -g {} -n {}'.format(resource_group, functionapp_name))
 
 
+class FunctionAppOnLinux(ScenarioTest):
+    @ResourceGroupPreparer(location='southcentralus')
+    @StorageAccountPreparer()
+    def test_functionapp_on_linux_asp(self, resource_group, storage_account):
+        plan = self.create_random_name(prefix='funcapplinplan', length=24)
+        functionapp = self.create_random_name(prefix='functionapp-linux', length=24)
+        self.cmd('appservice plan create -g {} -n {} --sku S1 --is-linux' .format(resource_group, plan), checks=[
+            JMESPathCheckV2('reserved', True),  # this weird field means it is a linux
+            JMESPathCheckV2('sku.name', 'S1'),
+        ])
+        self.cmd('functionapp create -g {} -n {} --plan {} -s {}'.format(resource_group, functionapp, plan, storage_account), checks=[
+            JMESPathCheckV2('name', functionapp)
+        ])
+        self.cmd('functionapp list -g {}'.format(resource_group), checks=[
+            JMESPathCheckV2('length([])', 1),
+            JMESPathCheckV2('[0].name', functionapp),
+            JMESPathCheckV2('[0].kind', 'functionapp,linux')
+        ])
+        self.cmd('functionapp delete -g {} -n {}'.format(resource_group, functionapp))
+
+
 class WebappAuthenticationTest(ScenarioTest):
     @ResourceGroupPreparer(name_prefix='cli_test_webapp_authentication')
     def test_webapp_authentication(self, resource_group):
@@ -830,6 +848,21 @@ class WebappUpdateTest(ScenarioTest):
                      JMESPathCheckV2('name', webapp_name),
                      JMESPathCheckV2('tags.foo', 'bar'),
                      JMESPathCheckV2('clientAffinityEnabled', False)])
+
+
+class WebappZipDeployScenarioTest(LiveScenarioTest):
+    @ResourceGroupPreparer(name_prefix='cli_test_webapp_zipDeploy')
+    def test_deploy_zip(self, resource_group):
+        webapp_name = self.create_random_name('webapp-zipDeploy-test', 40)
+        plan_name = self.create_random_name('webapp-zipDeploy-plan', 40)
+        zip_file = os.path.join(TEST_DIR, 'test.zip')
+        self.cmd('appservice plan create -g {} -n {} --sku S1'.format(resource_group, plan_name))
+        self.cmd('webapp create -g {} -n {} --plan {}'.format(resource_group, webapp_name, plan_name))
+        self.cmd('webapp deployment source config-zip -g {} -n {} --src "{}"'.format(resource_group, webapp_name, zip_file)).assert_with_checks([
+            JMESPathCheckV2('status', 4),
+            JMESPathCheckV2('deployer', 'Zip-Push'),
+            JMESPathCheckV2('message', 'Created via zip push deployment'),
+            JMESPathCheckV2('complete', True)])
 
 
 if __name__ == '__main__':

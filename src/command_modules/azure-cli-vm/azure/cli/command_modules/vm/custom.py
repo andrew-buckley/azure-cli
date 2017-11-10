@@ -1573,7 +1573,7 @@ def create_vm(vm_name, resource_group_name, image=None, size='Standard_DS1_v2', 
               storage_profile=None, os_publisher=None, os_offer=None, os_sku=None, os_version=None,
               storage_account_type=None, vnet_type=None, nsg_type=None, public_ip_type=None, nic_type=None,
               validate=False, custom_data=None, secrets=None, plan_name=None, plan_product=None, plan_publisher=None,
-              license_type=None, assign_identity=False, identity_scope=None,
+              plan_promotion_code=None, license_type=None, assign_identity=False, identity_scope=None,
               identity_role=DefaultStr('Contributor'), identity_role_id=None, application_security_groups=None,
               zone=None):
     from azure.cli.core.commands.client_factory import get_subscription_id
@@ -1697,7 +1697,8 @@ def create_vm(vm_name, resource_group_name, image=None, size='Standard_DS1_v2', 
         vm_resource['plan'] = {
             'name': plan_name,
             'publisher': plan_publisher,
-            'product': plan_product
+            'product': plan_product,
+            'promotionCode': plan_promotion_code
         }
 
     if assign_identity:
@@ -1774,7 +1775,7 @@ def create_vmss(vmss_name, resource_group_name, image,
                 load_balancer_type=None, app_gateway_type=None, vnet_type=None,
                 public_ip_type=None, storage_profile=None,
                 single_placement_group=None, custom_data=None, secrets=None,
-                plan_name=None, plan_product=None, plan_publisher=None, license_type=None,
+                plan_name=None, plan_product=None, plan_publisher=None, plan_promotion_code=None, license_type=None,
                 assign_identity=False, identity_scope=None, identity_role=DefaultStr('Contributor'),
                 identity_role_id=None, zones=None):
     from azure.cli.core.commands.client_factory import get_subscription_id
@@ -1976,7 +1977,8 @@ def create_vmss(vmss_name, resource_group_name, image,
         vmss_resource['plan'] = {
             'name': plan_name,
             'publisher': plan_publisher,
-            'product': plan_product
+            'product': plan_product,
+            'promotionCode': plan_promotion_code
         }
 
     if assign_identity:
@@ -2114,6 +2116,69 @@ def get_vm_format_secret(secrets, certificate_store=None):
                  for _, value in list(grouped_secrets.items())]
 
     return formatted
+
+
+def add_vm_secret(resource_group_name, vm_name, keyvault, certificate, certificate_store=None):
+    from ._vm_utils import create_keyvault_data_plane_client, get_key_vault_base_url
+    VaultSecretGroup, SourceVault, VaultCertificate = get_sdk(ResourceType.MGMT_COMPUTE, 'VaultSecretGroup',
+                                                              'SourceVault', 'VaultCertificate', mod='models')
+    vm = get_vm(resource_group_name, vm_name)
+
+    if '://' not in certificate:  # has a cert name rather a full url?
+        keyvault_client = create_keyvault_data_plane_client()
+        cert_info = keyvault_client.get_certificate(get_key_vault_base_url(parse_resource_id(keyvault)['name']),
+                                                    certificate, '')
+        certificate = cert_info.sid
+
+    if not _is_linux_vm(vm):
+        certificate_store = certificate_store or 'My'
+    elif certificate_store:
+        raise CLIError('Usage error: --certificate-store is only applicable on Windows VM')
+    vault_cert = VaultCertificate(certificate_url=certificate, certificate_store=certificate_store)
+    vault_secret_group = next((x for x in vm.os_profile.secrets
+                               if x.source_vault and x.source_vault.id.lower() == keyvault.lower()), None)
+    if vault_secret_group:
+        vault_secret_group.vault_certificates.append(vault_cert)
+    else:
+        vault_secret_group = VaultSecretGroup(source_vault=SourceVault(keyvault), vault_certificates=[vault_cert])
+        vm.os_profile.secrets.append(vault_secret_group)
+    vm = set_vm(vm)
+    return vm.os_profile.secrets
+
+
+def list_vm_secrets(resource_group_name, vm_name):
+    vm = get_vm(resource_group_name, vm_name)
+    return vm.os_profile.secrets
+
+
+def remove_vm_secret(resource_group_name, vm_name, keyvault, certificate=None):
+    vm = get_vm(resource_group_name, vm_name)
+
+    # support 2 kinds of filter:
+    # a. if only keyvault is supplied, we delete its whole vault group.
+    # b. if both keyvault and certificate are supplied, we only delete the specific cert entry.
+
+    to_keep = vm.os_profile.secrets
+    keyvault_matched = []
+    if keyvault:
+        keyvault = keyvault.lower()
+        keyvault_matched = [x for x in to_keep if x.source_vault and x.source_vault.id.lower() == keyvault]
+
+    if keyvault and not certificate:
+        to_keep = [x for x in to_keep if x not in keyvault_matched]
+    elif certificate:
+        temp = keyvault_matched if keyvault else to_keep
+        cert_url_pattern = certificate.lower()
+        if '://' not in cert_url_pattern:  # just a cert name?
+            cert_url_pattern = '/' + cert_url_pattern + '/'
+        for x in temp:
+            x.vault_certificates = ([v for v in x.vault_certificates
+                                     if not(v.certificate_url and cert_url_pattern in v.certificate_url.lower())])
+        to_keep = [x for x in to_keep if x.vault_certificates]  # purge all groups w/o any cert entries
+
+    vm.os_profile.secrets = to_keep
+    vm = set_vm(vm)
+    return vm.os_profile.secrets
 
 
 def assign_vm_identity(resource_group_name, vm_name, identity_role=DefaultStr('Contributor'),
